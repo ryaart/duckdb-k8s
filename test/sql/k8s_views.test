@@ -1,0 +1,103 @@
+# name: test/sql/k8s_views.test
+# description: typed views, logs and projection pushdown against the fixture cluster
+# group: [k8s]
+
+require k8s
+
+# ---- k8s_pods ----
+
+query TTTTIIIT
+SELECT name, phase, status, ready, containers_ready, containers, restarts, node FROM k8s_pods() ORDER BY name;
+----
+db-1	Pending	Pending	NULL	0	1	0	NULL
+web-1	Running	Running	true	1	1	0	node-1
+web-2	Running	CrashLoopBackOff	false	1	2	8	node-1
+
+query T
+SELECT array_to_string(images, ',') FROM k8s_pods() WHERE name = 'web-2';
+----
+nginx:1.27,envoyproxy/envoy:v1.33
+
+# the question agents actually ask
+query TT
+SELECT namespace || '/' || name, status FROM k8s_pods() WHERE NOT ready ORDER BY name;
+----
+shop/web-2	CrashLoopBackOff
+
+# ---- k8s_deployments ----
+
+query TIIIIT
+SELECT name, replicas, ready_replicas, updated_replicas, available_replicas, array_to_string(images, ',') FROM k8s_deployments();
+----
+api	2	1	2	1	ghcr.io/acme/api:2.1
+
+# ---- k8s_nodes ----
+
+query TTTTTTTT
+SELECT name, ready, array_to_string(roles, ','), unschedulable, version, internal_ip, cpu, memory FROM k8s_nodes() ORDER BY name;
+----
+node-1	true	control-plane,worker	false	v1.37.0	10.0.0.10	4	16Gi
+node-2	false	(empty)	true	NULL	10.0.0.11	2	8Gi
+
+# ---- k8s_services ----
+
+query TTITT
+SELECT name, type, len(external_ips), array_to_string(ports, ','), selector FROM k8s_services(namespace := 'shop') ORDER BY name;
+----
+api	NodePort	0	8080:30080/TCP	{"app":"api"}
+web	ClusterIP	0	80/TCP	{"app":"web"}
+
+# ---- k8s_events ----
+
+query TTTTITTT
+SELECT type, reason, object_kind, object_name, count, first_seen, last_seen, source FROM k8s_events() ORDER BY last_seen;
+----
+Normal	Scheduled	Pod	web-1	1	2026-09-29 09:00:00	2026-09-29 09:00:00	default-scheduler
+Warning	BackOff	Pod	web-2	12	2026-09-29 10:00:00	2026-09-29 10:30:00	kubelet
+
+# ---- projection pushdown: any subset of columns, including none ----
+
+query I
+SELECT count(*) FROM k8s_pods();
+----
+3
+
+query T
+SELECT name FROM k8s_nodes() ORDER BY name;
+----
+node-1
+node-2
+
+query TT
+SELECT restarts, name FROM k8s_pods() WHERE restarts > 0;
+----
+8	web-2
+
+query T
+SELECT kind FROM k8s('services', namespace := 'shop') LIMIT 1;
+----
+Service
+
+query II
+SELECT count(*), count(object) FROM k8s('pods');
+----
+3	3
+
+# selectors work on typed views too
+query T
+SELECT name FROM k8s_pods(label_selector := 'app=db');
+----
+db-1
+
+# ---- k8s_logs ----
+# The test cluster has no kubelet, so only the error paths can run here.
+
+statement error
+SELECT * FROM k8s_logs('nope', namespace := 'shop');
+----
+pods "nope" not found (HTTP 404)
+
+statement error
+SELECT * FROM k8s_logs('web-1', namespace := 'shop', container := 'web', tail := 10);
+----
+containerLogs/shop/web-1/web?tailLines=10&timestamps=true

@@ -1,0 +1,73 @@
+# name: test/sql/k8s.test
+# description: k8s() and k8s_contexts() against the fixture cluster from scripts/test-cluster.sh
+# group: [k8s]
+
+statement error
+SELECT * FROM k8s('pods');
+----
+Catalog Error: Table Function with name k8s does not exist!
+
+require k8s
+
+query T
+SELECT name FROM k8s_contexts() WHERE current;
+----
+test
+
+query IIII
+SELECT context, kind, namespace, name FROM k8s('pods') ORDER BY name;
+----
+test	Pod	shop	db-1
+test	Pod	shop	web-1
+test	Pod	shop	web-2
+
+# namespace and label selectors are pushed to the API server
+query TT
+SELECT name, labels->>'$.app' FROM k8s('pods', namespace := 'shop', label_selector := 'tier=frontend') ORDER BY name;
+----
+web-1	web
+web-2	web
+
+query I
+SELECT count(*) FROM k8s('pods', field_selector := 'metadata.name=db-1');
+----
+1
+
+# kind names, group-qualified plurals, and cluster-scoped resources resolve
+query I
+SELECT count(*) FROM k8s('Pod', namespace := 'shop');
+----
+3
+
+query TTT
+SELECT api_version, name, object->>'$.spec.template.spec.containers[0].image' FROM k8s('deployments.apps');
+----
+apps/v1	api	ghcr.io/acme/api:2.1
+
+query I
+SELECT count(*) > 0 FROM k8s('namespaces') WHERE name = 'shop';
+----
+true
+
+query I
+SELECT count(*) FROM k8s('pods') WHERE created IS NULL OR uid IS NULL;
+----
+0
+
+statement error
+SELECT * FROM k8s('widgets');
+----
+unknown resource 'widgets' in context 'test'
+
+statement error
+SELECT * FROM k8s('pods', context := 'no-such-context');
+----
+no-such-context
+
+# ---- k8s_describe: every function, parameter and column is documented ----
+
+query III
+SELECT count(DISTINCT function), count(*) FILTER (kind = 'column'), count(*) FILTER (description IS NULL OR description = '')
+FROM k8s_describe();
+----
+9	89	0
